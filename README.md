@@ -52,5 +52,4 @@ python3 cli.py upload /path/to/music.mp3 --title "歌曲名称" --tags "pop, roc
 
 ### 贡献者 (Contributors)
 
-- ANNOnElysia - 项目发起与需求设计
-- Google Gemini - 代码架构与实现
+- ANNOnElysia

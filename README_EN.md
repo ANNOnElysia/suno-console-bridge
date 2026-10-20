@@ -52,5 +52,4 @@ python3 cli.py upload /path/to/music.mp3 --title "Song Title" --tags "pop, rock"
 
 ### Contributors
 
-- ANNOnElysia - Project conception and direction
-- Google Gemini - Code implementation and architecture
+- ANNOnElysia
