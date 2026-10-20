@@ -49,7 +49,3 @@ python3 cli.py upload /path/to/music.mp3 --title "Song Title" --tags "pop, rock"
 
 - The locally generated auth_cache.json contains sensitive session tokens. Do not share it or commit it to public repositories.
 - This project is intended for personal localization, educational purposes, and technical research.
-
-### Contributors
-
-- ANNOnElysia

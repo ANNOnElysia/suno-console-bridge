@@ -49,7 +49,3 @@ python3 cli.py upload /path/to/music.mp3 --title "歌曲名称" --tags "pop, roc
 
 - 本地生成的 auth_cache.json 包含敏感登录凭证，请勿将其分享给他人或提交到公开代码仓库。
 - 本项目仅供技术研究、学习与个人本地化管理使用。
-
-### 贡献者 (Contributors)
-
-- ANNOnElysia
