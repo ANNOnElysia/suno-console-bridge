@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Suno Console Bridge - 开源本地工作台</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app-container">
+    <!-- 顶部导航 -->
+    <header class="header">
+      <div class="brand">
+        <div class="logo-icon">🎵</div>
+        <div>
+          <h1>Suno Console Bridge</h1>
+          <p class="subtitle">开源音频直传与登录同步工作台 · 100% 本地私有化</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <div id="bridge-badge" class="badge badge-warning">
+          <span class="dot"></span>
+          <span class="badge-text">检测油猴插件...</span>
+        </div>
+        <button id="btn-request-sync" class="btn btn-secondary">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
+          请求刷新登录态
+        </button>
+      </div>
+    </header>
+
+    <main class="main-grid">
+      <!-- 左侧：状态与上传面板 -->
+      <section class="left-col">
+        <!-- 状态卡片群 -->
+        <div class="cards-row">
+          <div class="card status-card">
+            <div class="card-header">
+              <span class="card-title">油猴桥接状态</span>
+              <span id="bridge-version" class="text-muted">未连接</span>
+            </div>
+            <div class="card-body">
+              <div id="bridge-status-text" class="status-indicator">等待油猴脚本注入...</div>
+              <p class="card-desc">请保持此页面处于 <code>http://localhost:3000</code>，并安装配套脚本。</p>
+            </div>
+          </div>
+
+          <div class="card status-card">
+            <div class="card-header">
+              <span class="card-title">Suno 账号凭据</span>
+              <span id="auth-status-badge" class="badge badge-gray">未同步</span>
+            </div>
+            <div class="card-body">
+              <div id="account-name" class="account-name">未检测到登录</div>
+              <div id="account-detail" class="text-muted small">请在另一个标签页打开 suno.com 并登录</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 音频直传控制台 -->
+        <div class="card upload-card">
+          <div class="card-header">
+            <span class="card-title">音频直传至 Suno</span>
+            <span class="badge badge-purple">S3 预签名直传</span>
+          </div>
+
+          <div class="card-body">
+            <!-- 拖拽上传区 -->
+            <div id="drop-zone" class="drop-zone">
+              <input type="file" id="audio-input" accept="audio/*" hidden>
+              <div class="drop-zone-content">
+                <div class="upload-icon">☁️</div>
+                <div class="drop-text">拖拽音频文件到此处，或 <span>点击浏览</span></div>
+                <div class="drop-hint">支持 MP3, WAV, FLAC, M4A, OGG（最大支持官方限制）</div>
+              </div>
+              <div id="file-info" class="file-info" style="display: none;">
+                <span class="file-icon">🎧</span>
+                <div class="file-meta">
+                  <div id="file-name" class="file-name">filename.mp3</div>
+                  <div id="file-size" class="file-size">0 MB</div>
+                </div>
+                <button type="button" id="btn-remove-file" class="btn-icon">✕</button>
+              </div>
+            </div>
+
+            <!-- 元数据表单 -->
+            <form id="upload-form" class="form-grid">
+              <div class="form-group">
+                <label for="song-title">歌曲标题 (Title)</label>
+                <input type="text" id="song-title" placeholder="输入音频标题..." class="form-input">
+              </div>
+
+              <div class="form-group">
+                <label for="song-tags">音乐风格 / Tags</label>
+                <input type="text" id="song-tags" placeholder="例如: pop, emotional, acoustic guitar" class="form-input">
+              </div>
+
+              <div class="form-group full-width">
+                <label for="song-lyrics">歌词 / Prompt 描述 (可选)</label>
+                <textarea id="song-lyrics" rows="3" placeholder="输入歌词结构或提示词..." class="form-input"></textarea>
+              </div>
+
+              <div class="form-group full-width checkbox-group">
+                <label class="custom-checkbox">
+                  <input type="checkbox" id="is-instrumental">
+                  <span class="checkmark"></span>
+                  纯音乐 (Instrumental，无歌词)
+                </label>
+                <label class="custom-checkbox">
+                  <input type="checkbox" id="require-captcha" checked>
+                  <span class="checkmark"></span>
+                  自动申请 Suno React 内部 Captcha 验证
+                </label>
+              </div>
+
+              <!-- 上传按钮 -->
+              <div class="form-actions full-width">
+                <button type="submit" id="btn-start-upload" class="btn btn-primary" disabled>
+                  <span>立即执行直传流程</span>
+                </button>
+              </div>
+            </form>
+
+            <!-- 进度显示 -->
+            <div id="progress-container" class="progress-container" style="display: none;">
+              <div class="progress-header">
+                <span id="progress-step">正在初始化...</span>
+                <span id="progress-percent">0%</span>
+              </div>
+              <div class="progress-bar-bg">
+                <div id="progress-bar-fill" class="progress-bar-fill" style="width: 0%;"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 右侧：调试日志与交互工具 -->
+      <section class="right-col">
+        <div class="card log-card">
+          <div class="card-header">
+            <span class="card-title">桥接通信与抓包日志</span>
+            <div class="log-actions">
+              <button id="btn-test-captcha" class="btn btn-xs btn-secondary">测试 Captcha 抓取</button>
+              <button id="btn-clear-log" class="btn btn-xs btn-ghost">清空</button>
+            </div>
+          </div>
+          <div class="card-body log-body">
+            <div id="console-logs" class="console-logs">
+              <div class="log-entry info"><span class="log-time">[System]</span> 工作台前端加载完成，正在等待油猴脚本...</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card info-card">
+          <div class="card-header">
+            <span class="card-title">📖 原理解析速查</span>
+          </div>
+          <div class="card-body">
+            <ul class="mechanism-list">
+              <li><strong>凭据同步：</strong>Suno 标签页通过 <code>patchedFetch</code> 监听 Token 并广播至 <code>localhost:3000</code>。</li>
+              <li><strong>无 CORS 限制：</strong>利用油猴的 <code>GM_xmlhttpRequest</code> 绕过同源策略直接与 Suno API 通信。</li>
+              <li><strong>S3 二进制直传：</strong>浏览器直接 PUT 音频二进制流到 AWS S3，零带宽占用本地服务器。</li>
+              <li><strong>自动化绕过人机：</strong>从 Suno 的 React Fiber 树中调用 <code>rootStore.session.getCaptchaTokenIfRequired</code>。</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
