@@ -214,20 +214,34 @@
       if (requestId) pendingUploadRequests.get(requestId)?.abort();
     });
 
-    // 监听 S3 二进制直接上传，利用 GM_xmlhttpRequest 彻底绕过 CORS 拦截
+    // 监听 S3 直传，根据 Suno 返回的数据自适应采用 POST (multipart/form-data) 或 PUT
     listenFromPage('suno-console-s3-upload-request', (detail) => {
-      const { requestId, url, file, contentType } = detail || {};
+      const { requestId, url, file, fields, contentType } = detail || {};
       if (!requestId || !url || !file) return;
 
       const uploadData = file?.wrappedJSObject || file;
+      let requestMethod = 'PUT';
+      let requestData = uploadData;
+      let requestHeaders = { 'Content-Type': contentType || 'audio/mpeg' };
+
+      // 如果 Suno 返回了 S3 fields 表单策略，必须使用 POST multipart/form-data
+      if (fields && typeof fields === 'object' && Object.keys(fields).length > 0) {
+        requestMethod = 'POST';
+        requestHeaders = {}; // 浏览器/油猴会自动生成带有 boundary 的 multipart Content-Type
+        const formData = new FormData();
+        // 按照 AWS 规范：表单策略字段必须先于 file 字段写入
+        for (const [key, val] of Object.entries(fields)) {
+          formData.append(key, val);
+        }
+        formData.append('file', uploadData);
+        requestData = formData;
+      }
 
       GM_xmlhttpRequest({
-        method: 'PUT',
+        method: requestMethod,
         url: url,
-        data: uploadData,
-        headers: {
-          'Content-Type': contentType || 'audio/mpeg'
-        },
+        data: requestData,
+        headers: requestHeaders,
         timeout: 180000,
         upload: {
           onprogress: (e) => {

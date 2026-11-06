@@ -386,16 +386,16 @@ class BridgeClient {
         throw new Error('Suno 接口未返回有效的预签名直传 URL: ' + JSON.stringify(uploadConfig));
       }
 
-      // 阶段 3：浏览器本地直接二进制 PUT 到 S3
-      this.updateProgress('正在将音频二进制流直传至 AWS S3...', 40);
-      this.log(`[阶段 3/4] 启动浏览器 S3 直传 (文件大小: ${(file.size / 1024 / 1024).toFixed(2)} MB)...`, 'info');
+      // 阶段 3：浏览器本地直接直传到 S3（支持 PUT 与 POST 表单多部分模式）
+      this.updateProgress('正在将音频直传至 AWS S3...', 40);
+      this.log(`[阶段 3/4] 启动 S3 表单直传 (文件大小: ${(file.size / 1024 / 1024).toFixed(2)} MB)...`, 'info');
 
-      await this.uploadDirectToS3(targetUrl, file, (percent) => {
+      await this.uploadDirectToS3(targetUrl, file, uploadConfig?.fields || null, (percent) => {
         const scaled = 40 + Math.round(percent * 0.45);
         this.updateProgress(`直传 S3 进度: ${percent}%`, scaled);
       });
 
-      this.log(`✔ S3 二进制流直传完成!`, 'success');
+      this.log(`✔ S3 直传完成!`, 'success');
 
       // 阶段 4：通知 Suno 确认上传并挂载元数据
       this.updateProgress('正在向 Suno 提交生成/保存确认...', 90);
@@ -427,8 +427,8 @@ class BridgeClient {
     }
   }
 
-  // S3 PUT 直传（优先通过油猴 GM_xmlhttpRequest 绕过浏览器同源 CORS 限制）
-  uploadDirectToS3(url, file, onProgress) {
+  // S3 直传（优先通过油猴 GM_xmlhttpRequest 绕过浏览器同源 CORS 限制，同时支持 fields 表单与单一 PUT）
+  uploadDirectToS3(url, file, fields, onProgress) {
     return new Promise((resolve, reject) => {
       const requestId = 's3_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
       
@@ -443,6 +443,7 @@ class BridgeClient {
         requestId,
         url,
         file,
+        fields: fields || null,
         contentType: file.type || 'audio/mpeg'
       });
 
