@@ -439,16 +439,12 @@ class BridgeClient {
         }
       }
 
-      // 3. 发送 initialize-clip 创建音频条目
+      // 3. 发送 initialize-clip 创建音频条目 (规范要求 body 必须为 {})
       this.updateProgress('正在入库创建歌曲...', 98);
       this.log('正在初始化音频 Clip (initialize-clip)...', 'info');
       let finalClip = null;
       try {
-        finalClip = await this.callSunoBridge(`/api/uploads/audio/${clipId}/initialize-clip/`, 'POST', {
-          title: title,
-          tags: tags,
-          prompt: lyrics
-        });
+        finalClip = await this.callSunoBridge(`/api/uploads/audio/${clipId}/initialize-clip/`, 'POST', {});
       } catch (e3) {
         finalClip = await this.callSunoBridge(`/api/uploads/audio/${clipId}/initialize-clip`, 'POST', {});
       }
