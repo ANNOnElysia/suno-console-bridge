@@ -422,14 +422,16 @@ class BridgeClient {
       this.log('正在等待 Suno 后台解析音频文件...', 'info');
       let isReady = false;
       for (let attempt = 1; attempt <= 15; attempt++) {
-        await new Promise(r => setTimeout(r, 1500));
+        await new Promise(r => setTimeout(r, 1200));
         try {
           const statusRes = await this.callSunoBridge(`/api/uploads/audio/${clipId}/`, 'GET')
             .catch(() => this.callSunoBridge(`/api/uploads/audio/${clipId}`, 'GET'));
           const status = statusRes?.status || statusRes?.state;
           this.log(`[轮询 ${attempt}/15] Suno 处理状态: ${status || '等待中'}`, 'info');
-          if (status === 'completed' || status === 'complete' || statusRes?.is_file_uploaded) {
+          // 一旦通过音频处理（passed_audio_processing）或 complete，立即退出循环并初始化
+          if (status === 'passed_audio_processing' || status === 'completed' || status === 'complete') {
             isReady = true;
+            this.log('✔ 音频后台处理成功通过，立即初始化 Clip!', 'success');
             break;
           }
         } catch (pollErr) {
