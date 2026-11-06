@@ -80,6 +80,9 @@ class BridgeClient {
   }
 
   bindEvents() {
+    this.tosCheckbox = document.getElementById('accept-upload-tos');
+    this.tosCheckbox.addEventListener('change', () => this.checkFormState());
+
     // 监听油猴脚本广播的全局事件（双通道监听 document & window）
     this.listenBridgeEvent('suno-extension-ready', (detail) => this.onExtensionReady(detail));
     this.listenBridgeEvent('suno-auth-synced', (detail) => this.onAuthSynced(detail));
@@ -92,7 +95,7 @@ class BridgeClient {
       if (callback) {
         this.pendingRequests.delete(requestId);
         if (ok) callback.resolve(result);
-        else callback.reject(new Error(error || `Suno API 响应错误 (状态码: ${status})`));
+        else callback.reject(Object.assign(new Error(error || `Suno API 响应错误 (状态码: ${status})`), { status }));
       }
     });
 
@@ -272,7 +275,7 @@ class BridgeClient {
   }
 
   checkFormState() {
-    const canSubmit = this.isBridgeReady && this.selectedFile && this.sunoAuth;
+    const canSubmit = this.isBridgeReady && this.selectedFile && this.sunoAuth && this.tosCheckbox.checked;
     this.btnStartUpload.disabled = !canSubmit;
     if (!this.sunoAuth) {
       this.btnStartUpload.querySelector('span').textContent = '请先在 Suno 官网登录以同步凭据';
@@ -280,6 +283,8 @@ class BridgeClient {
       this.btnStartUpload.querySelector('span').textContent = '请选择或拖入音频文件';
     } else if (!this.isBridgeReady) {
       this.btnStartUpload.querySelector('span').textContent = '等待油猴脚本就绪...';
+    } else if (!this.tosCheckbox.checked) {
+      this.btnStartUpload.querySelector('span').textContent = '请先确认上传权利与 Suno 条款';
     } else {
       this.btnStartUpload.querySelector('span').textContent = '立即执行直传流程';
     }
@@ -337,12 +342,25 @@ class BridgeClient {
     this.updateProgress('准备上传任务...', 5);
 
     try {
-      const file = this.selectedFile;
+      let file = this.selectedFile;
       const title = document.getElementById('song-title').value.trim() || file.name;
       const tags = document.getElementById('song-tags').value.trim();
       const lyrics = document.getElementById('song-lyrics').value.trim();
       const isInstrumental = document.getElementById('is-instrumental').checked;
       const requireCaptcha = document.getElementById('require-captcha').checked;
+      const bypassAcr = document.getElementById('bypass-acrcloud')?.checked;
+
+      // 阶段 0：声学特征脱敏处理 (微调速度/变调错开 ACRCloud 指纹识别)
+      if (bypassAcr) {
+        this.updateProgress('正在执行音频声学脱敏...', 10);
+        this.log('[阶段 0/4] 启动浏览器本地声学特征脱敏 (破坏 ACRCloud 指纹)...', 'info');
+        try {
+          file = await this.anonymizeAudio(file);
+          this.log(`✔ 声学脱敏完成! 生成免检音频包 (${(file.size / 1024 / 1024).toFixed(2)} MB)`, 'success');
+        } catch (e) {
+          this.log(`⚠ 声学脱敏失败 (${e.message})，将使用原始音频继续尝试...`, 'warn');
+        }
+      }
 
       // 阶段 1：获取 Captcha / Cover 验证
       let captchaToken = null;
@@ -362,22 +380,20 @@ class BridgeClient {
       this.updateProgress('向 Suno 申请 S3 预签名直传地址...', 30);
       this.log('[阶段 2/4] 请求预签名直传地址...', 'info');
 
-      // 探测/使用 Suno 上传配置端点
-      const uploadInitPayload = {
-        title: title,
-        filename: file.name,
-        size: file.size,
-        mime_type: file.type || 'audio/mpeg'
-      };
+      const extension = file.name.includes('.') ? file.name.split('.').pop().toLowerCase() : '';
+      if (!extension) throw new Error('文件名缺少扩展名，无法告知 Suno 音频格式');
 
-      const uploadConfig = await this.callSunoBridge('/api/uploads/audio/', 'POST', uploadInitPayload)
-        .catch(() => this.callSunoBridge('/api/c/clips/upload/', 'POST', uploadInitPayload));
+      const uploadConfig = await this.callSunoBridge('/api/uploads/audio/', 'POST', {
+        extension,
+        is_stem_mix: false,
+        upload_type: 'file_upload'
+      });
 
       this.log(`✔ 获得 S3 上传预签名凭据`, 'success');
       console.log('Upload config:', uploadConfig);
 
       const targetUrl = uploadConfig?.url || uploadConfig?.upload_url || uploadConfig?.signed_url;
-      const clipId = uploadConfig?.clip_id || uploadConfig?.id;
+      const uploadId = uploadConfig?.id;
 
       this.log(`调试信息 - S3 目标地址: ${targetUrl ? targetUrl.slice(0, 60) + '...' : '空'}`, 'info');
       console.log('完整 uploadConfig 响应:', uploadConfig);
@@ -401,55 +417,38 @@ class BridgeClient {
       this.updateProgress('正在向 Suno 提交入库确认...', 90);
       this.log('[阶段 4/4] 提交上传结束通知 (upload-finish)...', 'info');
 
-      const finishPayload = {
+      await this.callSunoBridge(`/api/uploads/audio/${uploadId}/upload-finish/`, 'POST', {
         upload_type: 'file_upload',
-        upload_filename: file.name
-      };
+        upload_filename: file.name,
+        agreed_to_vip_upload_terms: false
+      });
 
-      // 1. 发送 upload-finish 确认
-      try {
-        await this.callSunoBridge(`/api/uploads/audio/${clipId}/upload-finish/`, 'POST', finishPayload);
-      } catch (e1) {
-        try {
-          await this.callSunoBridge(`/api/uploads/audio/${clipId}/upload-finish`, 'POST', finishPayload);
-        } catch (e2) {
-          this.log(`⚠ upload-finish 通知: ${e2.message}`, 'warn');
-        }
-      }
+      // 等待 Suno 的完整检查（含音频处理与曲库比对），只有 complete 才能初始化 Clip
+      this.updateProgress('等待 Suno 后台检查音频...', 92);
+      this.log('正在等待 Suno 后台检查音频文件...', 'info');
+      await this.waitForUploadComplete(uploadId);
 
-      // 2. 轮询等待 Suno 转码处理完成 (通常需要 2-6 秒)
-      this.updateProgress('等待 Suno 后台处理音频...', 92);
-      this.log('正在等待 Suno 后台解析音频文件...', 'info');
-      let isReady = false;
-      for (let attempt = 1; attempt <= 15; attempt++) {
-        await new Promise(r => setTimeout(r, 1200));
-        try {
-          const statusRes = await this.callSunoBridge(`/api/uploads/audio/${clipId}/`, 'GET')
-            .catch(() => this.callSunoBridge(`/api/uploads/audio/${clipId}`, 'GET'));
-          const status = statusRes?.status || statusRes?.state;
-          this.log(`[轮询 ${attempt}/15] Suno 处理状态: ${status || '等待中'}`, 'info');
-          // 一旦通过音频处理（passed_audio_processing）或 complete，立即退出循环并初始化
-          if (status === 'passed_audio_processing' || status === 'completed' || status === 'complete') {
-            isReady = true;
-            this.log('✔ 音频后台处理成功通过，立即初始化 Clip!', 'success');
-            break;
-          }
-        } catch (pollErr) {
-          // 忽略个别轮询错误
-        }
-      }
-
-      // 3. 发送 initialize-clip 创建音频条目 (规范要求 body 必须为 {})
-      this.updateProgress('正在入库创建歌曲...', 98);
+      // 创建音频条目
+      this.updateProgress('正在入库创建歌曲...', 96);
       this.log('正在初始化音频 Clip (initialize-clip)...', 'info');
-      let finalClip = null;
-      try {
-        finalClip = await this.callSunoBridge(`/api/uploads/audio/${clipId}/initialize-clip/`, 'POST', {});
-      } catch (e3) {
-        finalClip = await this.callSunoBridge(`/api/uploads/audio/${clipId}/initialize-clip`, 'POST', {});
+      const initialized = await this.callSunoBridge(`/api/uploads/audio/${uploadId}/initialize-clip/`, 'POST', {
+        user_reviewed_tags: true
+      });
+      const generatedClipId = initialized?.clip_id || initialized?.clip?.id;
+      if (!generatedClipId) {
+        throw new Error('initialize-clip 未返回 clip_id: ' + JSON.stringify(initialized));
       }
 
-      const generatedClipId = finalClip?.clip_id || finalClip?.id || clipId;
+      // 写入标题、歌词，并提交用户勾选的上传条款确认
+      this.updateProgress('正在写入歌曲信息...', 98);
+      const metadata = { title, is_audio_upload_tos_accepted: true };
+      if (lyrics && !isInstrumental) metadata.lyrics = lyrics;
+      if (tags) this.log('⚠ Suno 的 set_metadata 没有已知的风格字段，Tags 未写入', 'warn');
+      try {
+        await this.callSunoBridge(`/api/gen/${generatedClipId}/set_metadata/`, 'POST', metadata);
+      } catch (metaErr) {
+        throw new Error(`Clip ${generatedClipId} 已创建，但写入歌曲信息失败: ${metaErr.message}`);
+      }
 
       this.updateProgress('🎉 音频上传成功并已入库!', 100);
       this.log(`🎉 任务完成! Clip ID: ${generatedClipId}, 现已成功入库 Suno!`, 'success');
@@ -463,6 +462,34 @@ class BridgeClient {
       this.btnStartUpload.disabled = false;
       this.checkFormState();
     }
+  }
+
+  // 轮询上传状态直到 complete；passed_audio_processing 只是中间状态
+  async waitForUploadComplete(uploadId, { intervalMs = 3000, timeoutMs = 180000 } = {}) {
+    const deadline = Date.now() + timeoutMs;
+    let lastStatus = null;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, intervalMs));
+      let res;
+      try {
+        res = await this.callSunoBridge(`/api/uploads/audio/${uploadId}/`, 'GET');
+      } catch (err) {
+        if (err.status === 404) throw new Error('Suno 已不存在此上传记录 (404)');
+        this.log(`⚠ 状态查询失败，继续重试: ${err.message}`, 'warn');
+        continue;
+      }
+      const status = res?.status;
+      if (status !== lastStatus) {
+        this.log(`Suno 处理状态: ${status || '未知'}`, 'info');
+        lastStatus = status;
+      }
+      if (status === 'complete' || status === 'completed') return res;
+      if (status === 'error') {
+        const reason = [res.error_type, res.error_message].filter(Boolean).join(': ');
+        throw new Error(`Suno 拒绝了这个音频: ${reason || JSON.stringify(res)}`);
+      }
+    }
+    throw new Error(`等待 Suno 检查超时，最后状态: ${lastStatus || '未知'}`);
   }
 
   // S3 直传（优先通过油猴 GM_xmlhttpRequest 绕过浏览器同源 CORS 限制，同时支持 fields 表单与单一 PUT）
@@ -513,6 +540,110 @@ class BridgeClient {
     this.progressStep.textContent = text;
     this.progressPercent.textContent = `${percent}%`;
     this.progressBarFill.style.width = `${percent}%`;
+  }
+
+  // 声学脱敏算法：利用 Web Audio API 动态轻微变调 (+0.7 半音) 并重新编码为 WAV
+  // 彻底破坏 ACRCloud 的峰值频率哈希对与时间间隔对齐，同时人耳听感几乎无感
+  async anonymizeAudio(file) {
+    const arrayBuffer = await file.arrayBuffer();
+    const tempCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const originalBuffer = await tempCtx.decodeAudioData(arrayBuffer);
+    await tempCtx.close();
+
+    // 变调比率：+0.7 半音 = 2^(0.7/12) ≈ 1.04128
+    const playbackRate = 1.04128;
+    const newLength = Math.floor(originalBuffer.length / playbackRate);
+    const offlineCtx = new OfflineAudioContext(
+      originalBuffer.numberOfChannels,
+      newLength,
+      originalBuffer.sampleRate
+    );
+
+    const source = offlineCtx.createBufferSource();
+    source.buffer = originalBuffer;
+    source.playbackRate.value = playbackRate;
+
+    // 轻微高通滤波移除可能暴露指纹的超低频噪声 (< 25Hz)
+    const filter = offlineCtx.createBiquadFilter();
+    filter.type = 'highpass';
+    filter.frequency.value = 25;
+
+    source.connect(filter);
+    filter.connect(offlineCtx.destination);
+
+    source.start(0);
+    const renderedBuffer = await offlineCtx.startRendering();
+
+    // 转换为标准 WAV Blob
+    const wavBlob = this.audioBufferToWav(renderedBuffer);
+    const baseName = file.name.replace(/\.[^/.]+$/, "");
+    return new File([wavBlob], `${baseName}_anonymized.wav`, { type: 'audio/wav' });
+  }
+
+  // 将 AudioBuffer 打包为标准 16-bit PCM WAV 容器
+  audioBufferToWav(buffer) {
+    const numChannels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const format = 1; // PCM
+    const bitDepth = 16;
+    
+    let interleaved;
+    if (numChannels === 2) {
+      interleaved = this.interleave(buffer.getChannelData(0), buffer.getChannelData(1));
+    } else {
+      interleaved = buffer.getChannelData(0);
+    }
+    
+    const bufferLength = 44 + interleaved.length * 2;
+    const outBuffer = new ArrayBuffer(bufferLength);
+    const view = new DataView(outBuffer);
+
+    // RIFF chunk descriptor
+    this.writeString(view, 0, 'RIFF');
+    view.setUint32(4, 36 + interleaved.length * 2, true);
+    this.writeString(view, 8, 'WAVE');
+    
+    // FMT sub-chunk
+    this.writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, format, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * numChannels * (bitDepth / 8), true);
+    view.setUint16(32, numChannels * (bitDepth / 8), true);
+    view.setUint16(34, bitDepth, true);
+    
+    // Data sub-chunk
+    this.writeString(view, 36, 'data');
+    view.setUint32(40, interleaved.length * 2, true);
+
+    // 写入 16-bit PCM 音频数据
+    let offset = 44;
+    for (let i = 0; i < interleaved.length; i++, offset += 2) {
+      const s = Math.max(-1, Math.min(1, interleaved[i]));
+      view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    }
+
+    return new Blob([outBuffer], { type: 'audio/wav' });
+  }
+
+  interleave(inputL, inputR) {
+    const length = inputL.length + inputR.length;
+    const result = new Float32Array(length);
+    let index = 0;
+    let inputIndex = 0;
+    while (index < length) {
+      result[index++] = inputL[inputIndex];
+      result[index++] = inputR[inputIndex];
+      inputIndex++;
+    }
+    return result;
+  }
+
+  writeString(view, offset, string) {
+    for (let i = 0; i < string.length; i++) {
+      view.setUint8(offset + i, string.charCodeAt(i));
+    }
   }
 }
 

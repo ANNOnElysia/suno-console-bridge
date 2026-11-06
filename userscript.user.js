@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Suno Console Bridge (开源本地版)
 // @namespace    https://github.com/local/suno-console-bridge
-// @version      1.0.0
+// @version      1.0.1
 // @description  开源本地版 Suno 登录同步与音频直传桥接助手，100% 本地闭环，无第三方中转
 // @match        https://suno.com/*
 // @match        https://www.suno.com/*
@@ -23,7 +23,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.0.0';
+  const VERSION = '1.0.1';
   const AUTO_REFRESH_INTERVAL = 15_000;
   const AUTH_KEY = 'sunoConsoleAuthSync:payload';
   const HEARTBEAT_KEY = 'sunoConsoleAuthSync:heartbeat';
@@ -342,7 +342,8 @@
               try { result = response.responseText ? JSON.parse(response.responseText) : null; } catch { result = response.responseText; }
               if (response.status >= 200 && response.status < 300) resolve(result);
               else {
-                const detail = typeof result === 'string' ? result : result?.detail || result?.error || result?.message || response.statusText;
+                const reason = typeof result === 'string' ? result : result?.detail || result?.error || result?.message;
+                const detail = (reason && typeof reason === 'string' ? reason : response.responseText) || '(空响应体)';
                 const error = new Error(`Suno 接口失败 ${response.status}：${detail}`);
                 error.status = response.status;
                 if (response.status === 401 && !authInvalidated && GM_getValue(AUTH_KEY, null)?.headers?.authorization === headers.authorization) {
