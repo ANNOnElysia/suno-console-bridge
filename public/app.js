@@ -413,11 +413,32 @@ class BridgeClient {
         try {
           await this.callSunoBridge(`/api/uploads/audio/${clipId}/upload-finish`, 'POST', finishPayload);
         } catch (e2) {
-          this.log(`⚠ upload-finish 响应: ${e2.message}，尝试下一步初始化...`, 'warn');
+          this.log(`⚠ upload-finish 通知: ${e2.message}`, 'warn');
         }
       }
 
-      // 2. 发送 initialize-clip 创建音频条目
+      // 2. 轮询等待 Suno 转码处理完成 (通常需要 2-6 秒)
+      this.updateProgress('等待 Suno 后台处理音频...', 92);
+      this.log('正在等待 Suno 后台解析音频文件...', 'info');
+      let isReady = false;
+      for (let attempt = 1; attempt <= 15; attempt++) {
+        await new Promise(r => setTimeout(r, 1500));
+        try {
+          const statusRes = await this.callSunoBridge(`/api/uploads/audio/${clipId}/`, 'GET')
+            .catch(() => this.callSunoBridge(`/api/uploads/audio/${clipId}`, 'GET'));
+          const status = statusRes?.status || statusRes?.state;
+          this.log(`[轮询 ${attempt}/15] Suno 处理状态: ${status || '等待中'}`, 'info');
+          if (status === 'completed' || status === 'complete' || statusRes?.is_file_uploaded) {
+            isReady = true;
+            break;
+          }
+        } catch (pollErr) {
+          // 忽略个别轮询错误
+        }
+      }
+
+      // 3. 发送 initialize-clip 创建音频条目
+      this.updateProgress('正在入库创建歌曲...', 98);
       this.log('正在初始化音频 Clip (initialize-clip)...', 'info');
       let finalClip = null;
       try {
