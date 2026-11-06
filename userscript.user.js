@@ -73,12 +73,71 @@
   // -------------------------------------------------------------
   function startConsoleSync() {
     const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-    pageWindow.__SUNO_CONSOLE_BRIDGE__ = {
+    const bridgeInfo = {
       version: VERSION,
       type: 'auth-sync-upload',
       upload: true,
       localSunoRead: true
     };
+
+    // 1. 设置全局标记（使用 cloneInto 确保 Firefox 页面安全读取）
+    try {
+      if (typeof cloneInto === 'function') {
+        pageWindow.__SUNO_CONSOLE_BRIDGE__ = cloneInto(bridgeInfo, pageWindow);
+      } else {
+        pageWindow.__SUNO_CONSOLE_BRIDGE__ = bridgeInfo;
+      }
+    } catch {
+      try { pageWindow.__SUNO_CONSOLE_BRIDGE__ = bridgeInfo; } catch {}
+    }
+
+    // 2. DOM 属性标记（绝对跨沙箱，Firefox & Chrome 100% 兼容无任何权限限制）
+    try {
+      document.documentElement.setAttribute('data-suno-bridge-ready', 'true');
+      document.documentElement.setAttribute('data-suno-bridge-version', VERSION);
+    } catch {}
+
+    // 跨沙箱双向通信辅助函数
+    function sendToPage(eventName, detail = {}) {
+      let safeDetail = detail;
+      if (typeof cloneInto === 'function' && typeof unsafeWindow !== 'undefined') {
+        try {
+          safeDetail = cloneInto(detail, unsafeWindow);
+        } catch {
+          try { safeDetail = JSON.parse(JSON.stringify(detail)); } catch {}
+        }
+      }
+      const eventInit = { detail: safeDetail };
+      try { document.dispatchEvent(new CustomEvent(eventName, eventInit)); } catch {}
+      try { window.dispatchEvent(new CustomEvent(eventName, eventInit)); } catch {}
+      if (typeof unsafeWindow !== 'undefined' && unsafeWindow !== window) {
+        try { unsafeWindow.dispatchEvent(new CustomEvent(eventName, eventInit)); } catch {}
+      }
+    }
+
+    const handledPageEvents = new Set();
+    function listenFromPage(eventName, handler) {
+      const wrapped = (e) => {
+        let detail = e.detail || {};
+        try {
+          if (detail && typeof detail === 'object' && typeof detail.wrappedJSObject !== 'undefined') {
+            detail = detail.wrappedJSObject;
+          }
+        } catch {}
+        if (detail?.requestId) {
+          const dedupeKey = `${eventName}:${detail.requestId}`;
+          if (handledPageEvents.has(dedupeKey)) return;
+          handledPageEvents.add(dedupeKey);
+          setTimeout(() => handledPageEvents.delete(dedupeKey), 20000);
+        }
+        handler(detail);
+      };
+      document.addEventListener(eventName, wrapped);
+      window.addEventListener(eventName, wrapped);
+      if (typeof unsafeWindow !== 'undefined' && unsafeWindow !== window) {
+        try { unsafeWindow.addEventListener(eventName, wrapped); } catch {}
+      }
+    }
 
     let syncing = false;
     let queuedSync = null;
@@ -109,7 +168,7 @@
         const data = await response.json();
         if (!response.ok) throw new Error(data?.error || '同步失败');
         authInvalidated = false;
-        window.dispatchEvent(new CustomEvent('suno-auth-synced', { detail: data.auth }));
+        sendToPage('suno-auth-synced', data.auth);
       } catch (error) {
         console.error('[SunoBridge] 同步凭证至本地后端失败:', error);
       } finally {
@@ -132,34 +191,40 @@
       if (typeof request.bodyJson === 'string') {
         try { requestBody = JSON.parse(request.bodyJson); }
         catch {
-          window.dispatchEvent(new CustomEvent('suno-console-upload-response', { detail: { requestId: request.requestId, ok: false, error: '上传请求数据无效' } }));
+          sendToPage('suno-console-upload-response', { requestId: request.requestId, ok: false, error: '上传请求数据无效' });
           return;
         }
       }
       const pending = callSunoApi(request.path, request.method, requestBody);
       pendingUploadRequests.set(request.requestId, pending);
       void pending.promise
-        .then((result) => window.dispatchEvent(new CustomEvent('suno-console-upload-response', { detail: { requestId: request.requestId, ok: true, result } })))
-        .catch((error) => window.dispatchEvent(new CustomEvent('suno-console-upload-response', { detail: { requestId: request.requestId, ok: false, error: error.message || String(error), status: error.status } })))
+        .then((result) => sendToPage('suno-console-upload-response', { requestId: request.requestId, ok: true, result }))
+        .catch((error) => sendToPage('suno-console-upload-response', { requestId: request.requestId, ok: false, error: error.message || String(error), status: error.status }))
         .finally(() => pendingUploadRequests.delete(request.requestId));
     }
 
-    window.addEventListener('suno-auth-sync-request', requestSync);
-    window.addEventListener('suno-console-upload-request', (event) => handleUploadRequest(event.detail || {}));
-    window.addEventListener('suno-console-upload-cancel', (event) => {
-      const requestId = event.detail?.requestId;
+    listenFromPage('suno-console-ping', () => {
+      sendToPage('suno-extension-ready', { type: 'auth-sync-upload', version: VERSION, upload: true, localSunoRead: true });
+    });
+
+    listenFromPage('suno-auth-sync-request', requestSync);
+    listenFromPage('suno-console-upload-request', (detail) => handleUploadRequest(detail || {}));
+    listenFromPage('suno-console-upload-cancel', (detail) => {
+      const requestId = detail?.requestId;
       if (requestId) pendingUploadRequests.get(requestId)?.abort();
     });
 
     // 监听 S3 二进制直接上传，利用 GM_xmlhttpRequest 彻底绕过 CORS 拦截
-    window.addEventListener('suno-console-s3-upload-request', (event) => {
-      const { requestId, url, file, contentType } = event.detail || {};
+    listenFromPage('suno-console-s3-upload-request', (detail) => {
+      const { requestId, url, file, contentType } = detail || {};
       if (!requestId || !url || !file) return;
+
+      const uploadData = file?.wrappedJSObject || file;
 
       GM_xmlhttpRequest({
         method: 'PUT',
         url: url,
-        data: file,
+        data: uploadData,
         headers: {
           'Content-Type': contentType || 'audio/mpeg'
         },
@@ -168,38 +233,34 @@
           onprogress: (e) => {
             if (e.lengthComputable) {
               const percent = Math.round((e.loaded / e.total) * 100);
-              window.dispatchEvent(new CustomEvent('suno-console-s3-upload-progress', {
-                detail: { requestId, percent }
-              }));
+              sendToPage('suno-console-s3-upload-progress', { requestId, percent });
             }
           }
         },
         onload: (res) => {
           if (res.status >= 200 && res.status < 300) {
-            window.dispatchEvent(new CustomEvent('suno-console-s3-upload-response', {
-              detail: { requestId, ok: true }
-            }));
+            sendToPage('suno-console-s3-upload-response', { requestId, ok: true });
           } else {
-            window.dispatchEvent(new CustomEvent('suno-console-s3-upload-response', {
-              detail: { requestId, ok: false, error: `S3 响应状态码: ${res.status}` }
-            }));
+            console.error('[SunoBridge] S3 直传失败详情:', res.status, res.responseText);
+            let s3Error = `S3 响应状态码: ${res.status}`;
+            if (res.responseText && res.responseText.includes('<Message>')) {
+              const msg = res.responseText.match(/<Message>(.*?)<\/Message>/)?.[1];
+              if (msg) s3Error += ` (${msg})`;
+            }
+            sendToPage('suno-console-s3-upload-response', { requestId, ok: false, error: s3Error });
           }
         },
         onerror: () => {
-          window.dispatchEvent(new CustomEvent('suno-console-s3-upload-response', {
-            detail: { requestId, ok: false, error: 'S3 网络连接错误' }
-          }));
+          sendToPage('suno-console-s3-upload-response', { requestId, ok: false, error: 'S3 网络连接错误' });
         },
         ontimeout: () => {
-          window.dispatchEvent(new CustomEvent('suno-console-s3-upload-response', {
-            detail: { requestId, ok: false, error: 'S3 直传超时' }
-          }));
+          sendToPage('suno-console-s3-upload-response', { requestId, ok: false, error: 'S3 直传超时' });
         }
       });
     });
 
-    window.addEventListener('suno-cover-verification-request', (event) => {
-      const request = event.detail || {};
+    listenFromPage('suno-cover-verification-request', (detail) => {
+      const request = detail || {};
       if (!request.requestId) return;
       pendingCoverVerifications.set(request.requestId, true);
       GM_setValue(COVER_VERIFICATION_REQUEST_KEY, { requestId: request.requestId, at: Date.now() });
@@ -209,7 +270,7 @@
     GM_addValueChangeListener(COVER_VERIFICATION_RESPONSE_KEY, (k, o, response, remote) => {
       if (!remote || !response?.requestId || !pendingCoverVerifications.has(response.requestId)) return;
       pendingCoverVerifications.delete(response.requestId);
-      window.dispatchEvent(new CustomEvent('suno-cover-verification-response', { detail: response }));
+      sendToPage('suno-cover-verification-response', response);
     });
 
     // 初始化通知
@@ -217,9 +278,12 @@
     if (pending) void sync(pending);
     if (!usableAuthorization(pending?.headers?.authorization)) requestSync();
 
-    window.dispatchEvent(new CustomEvent('suno-extension-ready', {
-      detail: { type: 'auth-sync-upload', version: VERSION, upload: true, localSunoRead: true }
-    }));
+    sendToPage('suno-extension-ready', {
+      type: 'auth-sync-upload',
+      version: VERSION,
+      upload: true,
+      localSunoRead: true
+    });
 
     function callSunoApi(path, method = 'GET', body) {
       let cancelled = false;
@@ -271,7 +335,7 @@
                   authInvalidated = true;
                   GM_deleteValue(AUTH_KEY);
                   void fetch('/api/auth?expired=1', { method: 'DELETE', credentials: 'include' }).catch(() => undefined);
-                  window.dispatchEvent(new CustomEvent('suno-auth-expired', { detail: { source: 'userscript' } }));
+                  sendToPage('suno-auth-expired', { source: 'userscript' });
                   GM_setValue(SYNC_REQUEST_KEY, { at: Date.now() });
                 }
                 reject(error);

@@ -57,15 +57,37 @@ class BridgeClient {
     this.progressBarFill = document.getElementById('progress-bar-fill');
   }
 
+  dispatchBridgeEvent(eventName, detail = {}) {
+    const eventInit = { detail };
+    try { document.dispatchEvent(new CustomEvent(eventName, eventInit)); } catch {}
+    try { window.dispatchEvent(new CustomEvent(eventName, eventInit)); } catch {}
+  }
+
+  listenBridgeEvent(eventName, handler) {
+    const handledMap = new Set();
+    const wrapped = (e) => {
+      const detail = e.detail || {};
+      if (detail.requestId) {
+        const key = `${eventName}:${detail.requestId}`;
+        if (handledMap.has(key)) return;
+        handledMap.add(key);
+        setTimeout(() => handledMap.delete(key), 20000);
+      }
+      handler(detail);
+    };
+    document.addEventListener(eventName, wrapped);
+    window.addEventListener(eventName, wrapped);
+  }
+
   bindEvents() {
-    // 监听油猴脚本广播的全局事件
-    window.addEventListener('suno-extension-ready', (e) => this.onExtensionReady(e.detail));
-    window.addEventListener('suno-auth-synced', (e) => this.onAuthSynced(e.detail));
-    window.addEventListener('suno-auth-expired', () => this.onAuthExpired());
+    // 监听油猴脚本广播的全局事件（双通道监听 document & window）
+    this.listenBridgeEvent('suno-extension-ready', (detail) => this.onExtensionReady(detail));
+    this.listenBridgeEvent('suno-auth-synced', (detail) => this.onAuthSynced(detail));
+    this.listenBridgeEvent('suno-auth-expired', () => this.onAuthExpired());
 
     // 监听油猴脚本对 API 调用的响应
-    window.addEventListener('suno-console-upload-response', (e) => {
-      const { requestId, ok, result, error, status } = e.detail || {};
+    this.listenBridgeEvent('suno-console-upload-response', (detail) => {
+      const { requestId, ok, result, error, status } = detail || {};
       const callback = this.pendingRequests.get(requestId);
       if (callback) {
         this.pendingRequests.delete(requestId);
@@ -75,8 +97,8 @@ class BridgeClient {
     });
 
     // 监听油猴脚本对 Captcha 验证的响应
-    window.addEventListener('suno-cover-verification-response', (e) => {
-      const { requestId, ok, result, error } = e.detail || {};
+    this.listenBridgeEvent('suno-cover-verification-response', (detail) => {
+      const { requestId, ok, result, error } = detail || {};
       const callback = this.pendingRequests.get(requestId);
       if (callback) {
         this.pendingRequests.delete(requestId);
@@ -86,8 +108,8 @@ class BridgeClient {
     });
 
     // 监听油猴脚本对 S3 上传进度的反馈
-    window.addEventListener('suno-console-s3-upload-progress', (e) => {
-      const { requestId, percent } = e.detail || {};
+    this.listenBridgeEvent('suno-console-s3-upload-progress', (detail) => {
+      const { requestId, percent } = detail || {};
       const callback = this.pendingRequests.get(requestId);
       if (callback && callback.onProgress) {
         callback.onProgress(percent);
@@ -95,8 +117,8 @@ class BridgeClient {
     });
 
     // 监听油猴脚本对 S3 上传结果的反馈
-    window.addEventListener('suno-console-s3-upload-response', (e) => {
-      const { requestId, ok, error } = e.detail || {};
+    this.listenBridgeEvent('suno-console-s3-upload-response', (detail) => {
+      const { requestId, ok, error } = detail || {};
       const callback = this.pendingRequests.get(requestId);
       if (callback) {
         this.pendingRequests.delete(requestId);
@@ -132,7 +154,7 @@ class BridgeClient {
     // 功能按钮
     this.btnRequestSync.addEventListener('click', () => {
       this.log('手动派发 suno-auth-sync-request 同步指令...', 'info');
-      window.dispatchEvent(new CustomEvent('suno-auth-sync-request'));
+      this.dispatchBridgeEvent('suno-auth-sync-request');
     });
 
     this.btnTestCaptcha.addEventListener('click', () => this.testCaptcha());
@@ -143,13 +165,29 @@ class BridgeClient {
   }
 
   startDetection() {
-    // 轮询检测油猴注入标记
-    const checkTimer = setInterval(() => {
-      if (window.__SUNO_CONSOLE_BRIDGE__) {
-        clearInterval(checkTimer);
-        this.onExtensionReady(window.__SUNO_CONSOLE_BRIDGE__);
+    const checkBridge = () => {
+      if (this.isBridgeReady) return;
+      const attrReady = document.documentElement.getAttribute('data-suno-bridge-ready') === 'true';
+      let bridgeObj = null;
+      try { bridgeObj = window.__SUNO_CONSOLE_BRIDGE__; } catch {}
+      if (bridgeObj || attrReady) {
+        const version = bridgeObj?.version || document.documentElement.getAttribute('data-suno-bridge-version') || '1.0.0';
+        this.onExtensionReady({ version, type: 'auth-sync-upload', upload: true, localSunoRead: true });
       }
-    }, 500);
+    };
+
+    // 立即检查
+    checkBridge();
+
+    // 轮询检测油猴注入标记与 DOM 属性，并主动发送 ping
+    const checkTimer = setInterval(() => {
+      if (this.isBridgeReady) {
+        clearInterval(checkTimer);
+        return;
+      }
+      checkBridge();
+      this.dispatchBridgeEvent('suno-console-ping');
+    }, 400);
 
     // 定期从后端拉取已保存的会话状态
     this.refreshBackendSession();
@@ -263,9 +301,7 @@ class BridgeClient {
         reject: (err) => { clearTimeout(timer); reject(err); }
       });
 
-      window.dispatchEvent(new CustomEvent('suno-console-upload-request', {
-        detail: { requestId, path, method, body }
-      }));
+      this.dispatchBridgeEvent('suno-console-upload-request', { requestId, path, method, body });
     });
   }
 
@@ -276,7 +312,7 @@ class BridgeClient {
     try {
       const promise = new Promise((resolve, reject) => {
         this.pendingRequests.set(requestId, { resolve, reject });
-        window.dispatchEvent(new CustomEvent('suno-cover-verification-request', { detail: { requestId } }));
+        this.dispatchBridgeEvent('suno-cover-verification-request', { requestId });
         setTimeout(() => {
           if (this.pendingRequests.has(requestId)) {
             this.pendingRequests.delete(requestId);
@@ -343,8 +379,11 @@ class BridgeClient {
       const targetUrl = uploadConfig?.url || uploadConfig?.upload_url || uploadConfig?.signed_url;
       const clipId = uploadConfig?.clip_id || uploadConfig?.id;
 
+      this.log(`调试信息 - S3 目标地址: ${targetUrl ? targetUrl.slice(0, 60) + '...' : '空'}`, 'info');
+      console.log('完整 uploadConfig 响应:', uploadConfig);
+
       if (!targetUrl) {
-        throw new Error('Suno 接口未返回有效的预签名直传 URL');
+        throw new Error('Suno 接口未返回有效的预签名直传 URL: ' + JSON.stringify(uploadConfig));
       }
 
       // 阶段 3：浏览器本地直接二进制 PUT 到 S3
@@ -400,14 +439,12 @@ class BridgeClient {
       });
 
       // 派发事件交由油猴脚本处理
-      window.dispatchEvent(new CustomEvent('suno-console-s3-upload-request', {
-        detail: {
-          requestId,
-          url,
-          file,
-          contentType: file.type || 'audio/mpeg'
-        }
-      }));
+      this.dispatchBridgeEvent('suno-console-s3-upload-request', {
+        requestId,
+        url,
+        file,
+        contentType: file.type || 'audio/mpeg'
+      });
 
       // 超时保护
       setTimeout(() => {
@@ -423,7 +460,7 @@ class BridgeClient {
     return new Promise((resolve, reject) => {
       const requestId = 'req_cap_' + Date.now();
       this.pendingRequests.set(requestId, { resolve, reject });
-      window.dispatchEvent(new CustomEvent('suno-cover-verification-request', { detail: { requestId } }));
+      this.dispatchBridgeEvent('suno-cover-verification-request', { requestId });
       setTimeout(() => {
         if (this.pendingRequests.has(requestId)) {
           this.pendingRequests.delete(requestId);
