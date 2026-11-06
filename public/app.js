@@ -397,24 +397,43 @@ class BridgeClient {
 
       this.log(`✔ S3 直传完成!`, 'success');
 
-      // 阶段 4：通知 Suno 确认上传并挂载元数据
-      this.updateProgress('正在向 Suno 提交生成/保存确认...', 90);
-      this.log('[阶段 4/4] 提交最终音频作品保存与确认...', 'info');
+      // 阶段 4：通知 Suno 确认上传完成并入库
+      this.updateProgress('正在向 Suno 提交入库确认...', 90);
+      this.log('[阶段 4/4] 提交上传结束通知 (upload-finish)...', 'info');
 
-      const finalizePayload = {
-        clip_id: clipId,
-        title: title,
-        tags: tags,
-        prompt: lyrics,
-        instrumental: isInstrumental,
-        token: captchaToken
+      const finishPayload = {
+        upload_type: 'file_upload',
+        upload_filename: file.name
       };
 
-      const finalResult = await this.callSunoBridge(`/api/uploads/audio/${clipId}/complete/`, 'POST', finalizePayload)
-        .catch(() => this.callSunoBridge('/api/c/clips/upload/complete/', 'POST', finalizePayload));
+      // 1. 发送 upload-finish 确认
+      try {
+        await this.callSunoBridge(`/api/uploads/audio/${clipId}/upload-finish/`, 'POST', finishPayload);
+      } catch (e1) {
+        try {
+          await this.callSunoBridge(`/api/uploads/audio/${clipId}/upload-finish`, 'POST', finishPayload);
+        } catch (e2) {
+          this.log(`⚠ upload-finish 响应: ${e2.message}，尝试下一步初始化...`, 'warn');
+        }
+      }
+
+      // 2. 发送 initialize-clip 创建音频条目
+      this.log('正在初始化音频 Clip (initialize-clip)...', 'info');
+      let finalClip = null;
+      try {
+        finalClip = await this.callSunoBridge(`/api/uploads/audio/${clipId}/initialize-clip/`, 'POST', {
+          title: title,
+          tags: tags,
+          prompt: lyrics
+        });
+      } catch (e3) {
+        finalClip = await this.callSunoBridge(`/api/uploads/audio/${clipId}/initialize-clip`, 'POST', {});
+      }
+
+      const generatedClipId = finalClip?.clip_id || finalClip?.id || clipId;
 
       this.updateProgress('🎉 音频上传成功并已入库!', 100);
-      this.log(`🎉 任务完成! Clip ID: ${clipId || '已生成'}, 现可在 Suno 工作台中查看。`, 'success');
+      this.log(`🎉 任务完成! Clip ID: ${generatedClipId}, 现已成功入库 Suno!`, 'success');
       alert(`🎉 恭喜！音频「${title}」已成功直传至 Suno！`);
 
     } catch (error) {
