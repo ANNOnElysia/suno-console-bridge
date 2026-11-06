@@ -17,6 +17,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // @connect      studio-api-prod.suno.com
+// @connect      *
 // ==/UserScript==
 
 (function () {
@@ -148,6 +149,53 @@
     window.addEventListener('suno-console-upload-cancel', (event) => {
       const requestId = event.detail?.requestId;
       if (requestId) pendingUploadRequests.get(requestId)?.abort();
+    });
+
+    // 监听 S3 二进制直接上传，利用 GM_xmlhttpRequest 彻底绕过 CORS 拦截
+    window.addEventListener('suno-console-s3-upload-request', (event) => {
+      const { requestId, url, file, contentType } = event.detail || {};
+      if (!requestId || !url || !file) return;
+
+      GM_xmlhttpRequest({
+        method: 'PUT',
+        url: url,
+        data: file,
+        headers: {
+          'Content-Type': contentType || 'audio/mpeg'
+        },
+        timeout: 180000,
+        upload: {
+          onprogress: (e) => {
+            if (e.lengthComputable) {
+              const percent = Math.round((e.loaded / e.total) * 100);
+              window.dispatchEvent(new CustomEvent('suno-console-s3-upload-progress', {
+                detail: { requestId, percent }
+              }));
+            }
+          }
+        },
+        onload: (res) => {
+          if (res.status >= 200 && res.status < 300) {
+            window.dispatchEvent(new CustomEvent('suno-console-s3-upload-response', {
+              detail: { requestId, ok: true }
+            }));
+          } else {
+            window.dispatchEvent(new CustomEvent('suno-console-s3-upload-response', {
+              detail: { requestId, ok: false, error: `S3 响应状态码: ${res.status}` }
+            }));
+          }
+        },
+        onerror: () => {
+          window.dispatchEvent(new CustomEvent('suno-console-s3-upload-response', {
+            detail: { requestId, ok: false, error: 'S3 网络连接错误' }
+          }));
+        },
+        ontimeout: () => {
+          window.dispatchEvent(new CustomEvent('suno-console-s3-upload-response', {
+            detail: { requestId, ok: false, error: 'S3 直传超时' }
+          }));
+        }
+      });
     });
 
     window.addEventListener('suno-cover-verification-request', (event) => {

@@ -85,6 +85,26 @@ class BridgeClient {
       }
     });
 
+    // 监听油猴脚本对 S3 上传进度的反馈
+    window.addEventListener('suno-console-s3-upload-progress', (e) => {
+      const { requestId, percent } = e.detail || {};
+      const callback = this.pendingRequests.get(requestId);
+      if (callback && callback.onProgress) {
+        callback.onProgress(percent);
+      }
+    });
+
+    // 监听油猴脚本对 S3 上传结果的反馈
+    window.addEventListener('suno-console-s3-upload-response', (e) => {
+      const { requestId, ok, error } = e.detail || {};
+      const callback = this.pendingRequests.get(requestId);
+      if (callback) {
+        this.pendingRequests.delete(requestId);
+        if (ok) callback.resolve();
+        else callback.reject(new Error(error || 'S3 直传错误'));
+      }
+    });
+
     // 拖拽与文件选择
     this.dropZone.addEventListener('click', (e) => {
       if (!this.selectedFile) this.audioInput.click();
@@ -368,28 +388,34 @@ class BridgeClient {
     }
   }
 
-  // S3 PUT 直传
+  // S3 PUT 直传（优先通过油猴 GM_xmlhttpRequest 绕过浏览器同源 CORS 限制）
   uploadDirectToS3(url, file, onProgress) {
     return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open('PUT', url, true);
-      xhr.setRequestHeader('Content-Type', file.type || 'audio/mpeg');
+      const requestId = 's3_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
+      
+      this.pendingRequests.set(requestId, {
+        resolve,
+        reject,
+        onProgress
+      });
 
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) {
-          const percent = Math.round((e.loaded / e.total) * 100);
-          onProgress(percent);
+      // 派发事件交由油猴脚本处理
+      window.dispatchEvent(new CustomEvent('suno-console-s3-upload-request', {
+        detail: {
+          requestId,
+          url,
+          file,
+          contentType: file.type || 'audio/mpeg'
         }
-      };
+      }));
 
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) resolve();
-        else reject(new Error(`S3 上传响应失败 (HTTP ${xhr.status})`));
-      };
-
-      xhr.onerror = () => reject(new Error('S3 网络直传错误，请检查网络连接'));
-      xhr.onabort = () => reject(new Error('S3 上传已取消'));
-      xhr.send(file);
+      // 超时保护
+      setTimeout(() => {
+        if (this.pendingRequests.has(requestId)) {
+          this.pendingRequests.delete(requestId);
+          reject(new Error('S3 直传响应超时'));
+        }
+      }, 190000);
     });
   }
 
